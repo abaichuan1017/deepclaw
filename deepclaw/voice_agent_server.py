@@ -15,6 +15,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -735,38 +736,63 @@ def ensure_openclaw_voice_agent():
         )
 
 
+def check_credentials():
+    """Determine which credentials are required for the active VOICE_PROVIDER.
+
+    Returns (provider_valid, checks): provider_valid is False if VOICE_PROVIDER
+    isn't 'twilio' or 'telnyx'. checks is a list of (var_name, is_set) tuples
+    covering DEEPGRAM_API_KEY, OPENCLAW_GATEWAY_TOKEN, and (when the provider
+    is valid) that provider's credential variables.
+    """
+    checks = [
+        ("DEEPGRAM_API_KEY", bool(DEEPGRAM_API_KEY)),
+        ("OPENCLAW_GATEWAY_TOKEN", bool(OPENCLAW_GATEWAY_TOKEN)),
+    ]
+    if VOICE_PROVIDER == "twilio":
+        checks.append(("TWILIO_ACCOUNT_SID", bool(TWILIO_ACCOUNT_SID)))
+        checks.append(("TWILIO_AUTH_TOKEN", bool(TWILIO_AUTH_TOKEN)))
+        return True, checks
+    elif VOICE_PROVIDER == "telnyx":
+        checks.append(("TELNYX_API_KEY", bool(TELNYX_API_KEY)))
+        checks.append(("TELNYX_PUBLIC_KEY", bool(TELNYX_PUBLIC_KEY)))
+        return True, checks
+    else:
+        return False, checks
+
+
+def run_doctor() -> int:
+    """Validate credentials for the active VOICE_PROVIDER without starting anything.
+
+    Prints one line per required variable naming it and whether it is set or
+    MISSING (never the value). Makes no network or subprocess calls.
+    Returns the process exit code: 0 if everything required is set, else 1.
+    """
+    provider_valid, checks = check_credentials()
+    ok = True
+    for name, is_set in checks:
+        print(f"{name}: {'set' if is_set else 'MISSING'}")
+        if not is_set:
+            ok = False
+    if not provider_valid:
+        print(f"VOICE_PROVIDER: invalid ({VOICE_PROVIDER!r}; must be 'twilio' or 'telnyx')")
+        ok = False
+    return 0 if ok else 1
+
+
 def main():
     """Run the server."""
     import uvicorn
 
-    # Validate required configuration
-    if not DEEPGRAM_API_KEY:
-        logger.error("DEEPGRAM_API_KEY not set. Get one at https://console.deepgram.com/")
-        return
-    if not OPENCLAW_GATEWAY_TOKEN:
-        logger.error("OPENCLAW_GATEWAY_TOKEN not set. Generate with: openssl rand -hex 32")
-        return
-    
-    # Validate voice provider configuration
-    if VOICE_PROVIDER == "twilio":
-        if not TWILIO_ACCOUNT_SID:
-            logger.error("TWILIO_ACCOUNT_SID not set for Twilio provider")
-            return
-        if not TWILIO_AUTH_TOKEN:
-            logger.error("TWILIO_AUTH_TOKEN not set for Twilio provider")
-            return
-        logger.info("Using Twilio as voice provider")
-    elif VOICE_PROVIDER == "telnyx":
-        if not TELNYX_API_KEY:
-            logger.error("TELNYX_API_KEY not set for Telnyx provider")
-            return
-        if not TELNYX_PUBLIC_KEY:
-            logger.error("TELNYX_PUBLIC_KEY not set for Telnyx provider")
-            return
-        logger.info("Using Telnyx as voice provider")
-    else:
+    provider_valid, checks = check_credentials()
+    missing = [name for name, is_set in checks if not is_set]
+    for name in missing:
+        logger.error(f"{name} not set")
+    if not provider_valid:
         logger.error(f"Invalid VOICE_PROVIDER: {VOICE_PROVIDER}. Must be 'twilio' or 'telnyx'")
-        return
+    if missing or not provider_valid:
+        sys.exit(1)
+
+    logger.info(f"Using {VOICE_PROVIDER.capitalize()} as voice provider")
 
     ensure_openclaw_voice_agent()
 
