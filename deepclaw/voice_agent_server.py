@@ -8,6 +8,7 @@ This server: bridges Twilio <-> Deepgram Voice Agent API AND proxies LLM request
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -15,6 +16,8 @@ import re
 import secrets
 import shutil
 import subprocess
+import time
+from urllib.parse import parse_qs
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
@@ -59,6 +62,21 @@ app = FastAPI(title="deepclaw-voice-agent")
 # Deepgram sends LLM requests from a fixed IP per call session, so we
 # use the caller IP to correlate proxy requests with the right call.
 _active_sessions: dict[str, str] = {}
+
+# Track call-lifecycle metadata (hashed caller number + start time) keyed by
+# provider call id, so later lifecycle events can log call-connect/call-end.
+_twilio_calls: dict[str, dict] = {}
+_telnyx_calls: dict[str, dict] = {}
+
+
+def hash_caller_number(number: str) -> str:
+    """Deterministically hash a caller phone number for log correlation.
+
+    Unsalted-on-purpose: the same number must always hash the same way so
+    repeat calls can be correlated in logs, without ever logging the raw
+    number.
+    """
+    return hashlib.sha256(number.encode("utf-8")).hexdigest()[:16]
 
 
 async def prewarm_openclaw_session(session_key: str):
@@ -281,6 +299,22 @@ async def twilio_incoming(request: Request):
     https://www.twilio.com/docs/usage/security#validating-requests
     """
     host = request.headers.get("host", "localhost:8000")
+
+    body_bytes = await request.body()
+    form_fields = parse_qs(body_bytes.decode("utf-8"))
+    caller_number = form_fields.get("From", [""])[0]
+    call_sid = form_fields.get("CallSid", [""])[0]
+    if call_sid:
+        hashed_number = hash_caller_number(caller_number) if caller_number else None
+        _twilio_calls[call_sid] = {
+            "hashed_number": hashed_number,
+            "start_time": time.monotonic(),
+        }
+        logger.info(
+            "Call started: provider=twilio call_id=%s caller_hash=%s",
+            call_sid, hashed_number,
+        )
+
     twiml = TWIML_TEMPLATE.format(host=host)
     logger.info(f"Incoming call, connecting to wss://{host}/twilio/media")
     return Response(content=twiml, media_type="application/xml")
@@ -293,6 +327,7 @@ async def twilio_media_websocket(websocket: WebSocket):
     logger.info("Twilio WebSocket connected")
 
     stream_sid: str | None = None
+    call_sid: str | None = None
     session_key: str | None = None
     deepgram_ws = None
     sender_task = None
@@ -386,6 +421,7 @@ async def twilio_media_websocket(websocket: WebSocket):
 
             elif event == "start":
                 stream_sid = message.get("streamSid")
+                call_sid = message.get("start", {}).get("callSid")
 
                 # Get the public URL from the websocket headers
                 host = websocket.headers.get("host", "localhost:8000")
@@ -393,6 +429,12 @@ async def twilio_media_websocket(websocket: WebSocket):
 
                 logger.info(f"Stream started: {stream_sid}")
                 logger.info(f"Public URL for LLM proxy: {public_url}")
+
+                call_info = _twilio_calls.get(call_sid) if call_sid else None
+                logger.info(
+                    "Call connected: provider=twilio call_id=%s caller_hash=%s",
+                    call_sid, call_info.get("hashed_number") if call_info else None,
+                )
 
                 # Create a stable session key for this call and register
                 # it so the LLM proxy can find it when Deepgram calls back.
@@ -456,6 +498,14 @@ async def twilio_media_websocket(websocket: WebSocket):
             for k, v in list(_active_sessions.items()):
                 if v == session_key:
                     del _active_sessions[k]
+        if call_sid:
+            call_info = _twilio_calls.pop(call_sid, None)
+            if call_info:
+                duration = time.monotonic() - call_info["start_time"]
+                logger.info(
+                    "Call ended: provider=twilio call_id=%s caller_hash=%s duration=%.2fs",
+                    call_sid, call_info.get("hashed_number"), duration,
+                )
         logger.info("Cleanup complete")
 
 
@@ -474,6 +524,16 @@ async def telnyx_webhook(request: Request):
     if event_type == "call.initiated":
         # Incoming call - answer and start media streaming
         call_control_id = body["data"]["payload"]["call_control_id"]
+        caller_number = body["data"]["payload"].get("from", "")
+        hashed_number = hash_caller_number(caller_number) if caller_number else None
+        _telnyx_calls[call_control_id] = {
+            "hashed_number": hashed_number,
+            "start_time": time.monotonic(),
+        }
+        logger.info(
+            "Call started: provider=telnyx call_id=%s caller_hash=%s",
+            call_control_id, hashed_number,
+        )
         
         # Get the public URL from the request headers
         host = request.headers.get("host", "localhost:8000")
@@ -502,8 +562,22 @@ async def telnyx_webhook(request: Request):
             logger.error(f"Error answering Telnyx call: {e}")
     
     elif event_type == "call.answered":
+        call_control_id = body.get("data", {}).get("payload", {}).get("call_control_id")
+        call_info = _telnyx_calls.get(call_control_id) if call_control_id else None
+        logger.info(
+            "Call connected: provider=telnyx call_id=%s caller_hash=%s",
+            call_control_id, call_info.get("hashed_number") if call_info else None,
+        )
         logger.info("Telnyx call answered")
     elif event_type == "call.hangup":
+        call_control_id = body.get("data", {}).get("payload", {}).get("call_control_id")
+        call_info = _telnyx_calls.pop(call_control_id, None) if call_control_id else None
+        if call_info:
+            duration = time.monotonic() - call_info["start_time"]
+            logger.info(
+                "Call ended: provider=telnyx call_id=%s caller_hash=%s duration=%.2fs",
+                call_control_id, call_info.get("hashed_number"), duration,
+            )
         logger.info("Telnyx call ended")
     elif event_type == "streaming.started":
         logger.info("Telnyx media streaming started")
