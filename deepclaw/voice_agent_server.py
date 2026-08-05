@@ -671,8 +671,21 @@ async def telnyx_media_websocket(websocket: WebSocket):
 
 
 @app.get("/health")
-async def health():
-    """Health check endpoint."""
+async def health(request: Request):
+    """Health check endpoint.
+
+    If HEALTH_TOKEN is set, requests must present a matching
+    `Authorization: Bearer <token>` header. Kept separate from
+    PROXY_SECRET so health-check access can be granted without
+    granting whatever PROXY_SECRET protects.
+    """
+    health_token = os.getenv("HEALTH_TOKEN")
+    if health_token:
+        auth_header = request.headers.get("Authorization", "")
+        expected = f"Bearer {health_token}"
+        if not secrets.compare_digest(auth_header, expected):
+            return Response(status_code=401)
+
     provider = os.getenv("VOICE_PROVIDER", "twilio").lower()
 
     credentials = {

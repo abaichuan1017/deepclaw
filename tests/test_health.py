@@ -85,3 +85,51 @@ def test_health_includes_telnyx_specific_credentials_when_telnyx_provider(monkey
     assert "telnyx_api_key_set" in credentials
     assert "twilio_account_sid_set" not in credentials
     assert "twilio_auth_token_set" not in credentials
+
+
+def test_health_is_open_when_health_token_unset(monkeypatch):
+    monkeypatch.delenv("HEALTH_TOKEN", raising=False)
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(["status", "service", "provider", "credentials"]) <= set(body.keys())
+    assert body["status"] == "ok"
+
+
+def test_health_rejects_missing_or_wrong_bearer_token_when_guard_set(monkeypatch):
+    monkeypatch.setenv("HEALTH_TOKEN", "correct-horse-battery-staple")
+
+    r = client.get("/health")
+    assert r.status_code == 401
+
+    r = client.get("/health", headers={"Authorization": "Bearer wrong-token"})
+    assert r.status_code == 401
+
+    r = client.get("/health", headers={"Authorization": "correct-horse-battery-staple"})
+    assert r.status_code == 401
+
+
+def test_health_accepts_correct_bearer_token_when_guard_set(monkeypatch):
+    monkeypatch.setenv("HEALTH_TOKEN", "correct-horse-battery-staple")
+
+    r = client.get(
+        "/health",
+        headers={"Authorization": "Bearer correct-horse-battery-staple"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "deepclaw-voice-agent"
+
+
+def test_health_does_not_leak_health_token_value(monkeypatch):
+    token = "fake-secret-do-not-leak-health_token"
+    monkeypatch.setenv("HEALTH_TOKEN", token)
+
+    r = client.get("/health", headers={"Authorization": "Bearer wrong-token"})
+    assert r.status_code == 401
+    assert token not in r.text
+
+    r = client.get("/health", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 200
+    assert token not in r.text
