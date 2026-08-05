@@ -673,7 +673,24 @@ async def telnyx_media_websocket(websocket: WebSocket):
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "ok", "service": "deepclaw-voice-agent"}
+    provider = os.getenv("VOICE_PROVIDER", "twilio").lower()
+
+    credentials = {
+        "deepgram_api_key_set": bool(os.getenv("DEEPGRAM_API_KEY")),
+        "openclaw_gateway_token_set": bool(os.getenv("OPENCLAW_GATEWAY_TOKEN")),
+    }
+    if provider == "twilio":
+        credentials["twilio_account_sid_set"] = bool(os.getenv("TWILIO_ACCOUNT_SID"))
+        credentials["twilio_auth_token_set"] = bool(os.getenv("TWILIO_AUTH_TOKEN"))
+    elif provider == "telnyx":
+        credentials["telnyx_api_key_set"] = bool(os.getenv("TELNYX_API_KEY"))
+
+    return {
+        "status": "ok",
+        "service": "deepclaw-voice-agent",
+        "provider": provider,
+        "credentials": credentials,
+    }
 
 
 OPENCLAW_VOICE_MODEL = os.getenv(
