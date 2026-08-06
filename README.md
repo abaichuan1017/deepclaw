@@ -188,6 +188,40 @@ python -m deepclaw
 
 Pick up the phone and talk to your OpenClaw!
 
+## Development
+
+### 1. Install with dev extras
+
+```bash
+pip install -e ".[dev]"
+```
+
+The quotes keep the shell from glob-expanding `[dev]`. This installs `pytest` and `pytest-asyncio`, declared under `[project.optional-dependencies]` `dev` in `pyproject.toml`.
+
+### 2. Set up your environment
+
+```bash
+cp .env.example .env
+```
+
+Fill in the credential values in `.env`: `DEEPGRAM_API_KEY`, plus either `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN` or `TELNYX_API_KEY`/`TELNYX_PUBLIC_KEY` depending on `VOICE_PROVIDER`, and `OPENCLAW_GATEWAY_URL`/`OPENCLAW_GATEWAY_TOKEN`. These are the same variables listed in `.env.example`.
+
+### 3. Start the server
+
+```bash
+python -m deepclaw
+```
+
+Run this from the repo root — the directory containing `.env` — since environment loading only reads `.env` from the current working directory. On startup, the server validates required configuration before it binds to a port. If any credential is missing, it logs an error naming the specific missing variable (e.g. `DEEPGRAM_API_KEY not set`) and exits cleanly instead of starting.
+
+### 4. Run the tests
+
+```bash
+pytest
+```
+
+This is the configured test runner for the project. There's no test suite in the repository yet — running `pytest` now mainly confirms the dev environment is wired up correctly; it's the command to use once tests are added.
+
 ## Architecture
 
 ```
